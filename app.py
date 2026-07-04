@@ -100,12 +100,16 @@ HTML_TEMPLATE = """
         .card:hover { transform: translateY(-3px); box-shadow: 0 6px 12px rgba(0,0,0,0.1); }
         .btn { background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
         .btn-back { background: #616161; margin-bottom: 20px; }
+        .btn-edit { background: #ff9100; color: white; padding: 4px 10px; font-size: 13px; border-radius: 4px; text-decoration: none; display: inline-block; }
         .price-tag { font-size: 24px; color: var(--primary); font-weight: bold; margin: 10px 0; }
         .mrp { text-decoration: line-through; color: #757575; font-size: 16px; }
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: bold; }
-        input, textarea { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+        input, textarea, select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
         .qr-box { background: white; padding: 30px; border-radius: 12px; text-align: center; max-width: 400px; margin: 40px auto; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #e8f5e9; color: var(--primary); font-weight: bold; }
     </style>
 </head>
 <body>
@@ -207,6 +211,61 @@ HTML_TEMPLATE = """
                     <button type="submit" class="btn">➕ Add to Digital Menu</button>
                 </form>
             </div>
+
+            <h2>Current Inventory Items (Click Edit to modify)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Category</th>
+                        <th>Name</th>
+                        <th>MRP</th>
+                        <th>Sale Price</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for prod in data %}
+                    <tr>
+                        <td>{{ prod.category }}</td>
+                        <td>{{ prod.name }}</td>
+                        <td>₹{{ prod.mrp }}</td>
+                        <td>₹{{ prod.sale_price }}</td>
+                        <td><a href="/admin/edit/{{ prod.id }}" class="btn-edit">✏️ Edit</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+        {% elif view == 'edit' %}
+            <a href="/admin/dashboard" class="btn btn-back">← Back to Dashboard</a>
+            <h2>Modify Product Details</h2>
+            <div class="card" style="text-align: left;">
+                <form action="/admin/update/{{ data.id }}" method="post">
+                    <div class="form-group">
+                        <label>Product Category</label>
+                        <input type="text" name="category" value="{{ data.category }}" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Product Brand Name & Size</label>
+                        <input type="text" name="name" value="{{ data.name }}" required>
+                    </div>
+                    <div class="form-group" style="display: flex; gap: 10px;">
+                        <div style="flex: 1;">
+                            <label>MRP (₹)</label>
+                            <input type="number" step="0.01" name="mrp" value="{{ data.mrp }}" required>
+                        </div>
+                        <div style="flex: 1;">
+                            <label>Sale Price (₹)</label>
+                            <input type="number" step="0.01" name="sale_price" value="{{ data.sale_price }}" required>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Customer Instructions</label>
+                        <textarea name="instructions" rows="3" required>{{ data.instructions }}</textarea>
+                    </div>
+                    <button type="submit" class="btn" style="background: #ff9100;">💾 Save Changes</button>
+                </form>
+            </div>
         {% endif %}
     </div>
 </body>
@@ -237,7 +296,7 @@ def customer_product(prod_id):
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     if request.method == 'POST':
-        if request.form['username'] == 'kfm' and request.form['password'] == '12345678':
+        if request.form['username'] == 'admin' and request.form['password'] == 'grocerystore2026':
             session['logged_in'] = True
             return redirect(url_for('admin_dashboard'))
         return render_template_string(HTML_TEMPLATE, view='login', error='Incorrect password!')
@@ -247,7 +306,8 @@ def admin_login():
 def admin_dashboard():
     if not session.get('logged_in'):
         return redirect(url_for('admin_login'))
-    return render_template_string(HTML_TEMPLATE, view='dashboard')
+    all_products = query_db('SELECT * FROM products ORDER BY category, name')
+    return render_template_string(HTML_TEMPLATE, view='dashboard', data=all_products)
 
 @app.route('/admin/add', methods=['POST'])
 def add_product():
@@ -255,14 +315,39 @@ def add_product():
         return redirect(url_for('admin_login'))
     query_db('INSERT INTO products (category, name, mrp, sale_price, instructions) VALUES (?, ?, ?, ?, ?)',
              [request.form['category'].strip(), request.form['name'].strip(), float(request.form['mrp']), float(request.form['sale_price']), request.form['instructions'].strip()])
-    return redirect(url_for('customer_home'))
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/edit/<int:prod_id>')
+def edit_product(prod_id):
+    if not session.get('logged_in'):
+        return redirect(url_for('admin_login'))
+    prod = query_db('SELECT * FROM products WHERE id = ?', [prod_id], one=True)
+    return render_template_string(HTML_TEMPLATE, view='edit', data=prod)
+
+@app.route('/admin/update/<int:prod_id>', methods=['POST'])
+def update_product(prod_id):
+    if not session.get('logged_in'):
+        return redirect(url_for('admin_login'))
+    query_db('''
+        UPDATE products 
+        SET category = ?, name = ?, mrp = ?, sale_price = ?, instructions = ? 
+        WHERE id = ?
+    ''', [
+        request.form['category'].strip(),
+        request.form['name'].strip(),
+        float(request.form['mrp']),
+        float(request.form['sale_price']),
+        request.form['instructions'].strip(),
+        prod_id
+    ])
+    return redirect(url_for('admin_dashboard'))
 
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect(url_for('customer_home'))
 
-# This will initialize the tables perfectly both locally and on Render
+# This initializes tables correctly both locally and on Render
 init_db()
 
 if __name__ == '__main__':
