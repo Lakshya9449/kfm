@@ -8,7 +8,7 @@ import base64
 app = Flask(__name__)
 app.secret_key = 'super_secret_grocery_key_2026'
 
-# Make sure your phone is connected to the same Wi-Fi network as this computer!
+# Directs your scanned QR code straight to your store menu page
 PRODUCTION_STORE_URL = "https://kfm-cjav.onrender.com/customer"
 
 def init_db():
@@ -135,7 +135,7 @@ HTML_TEMPLATE = """
             <div class="qr-box">
                 <h3>Your Shop QR Code</h3>
                 <img src="data:image/png;base64,{{ qr_img }}" alt="Scan QR Code" style="width:200px;height:200px;"/>
-                <p style="font-size:12px; color:#666;">Scan with your phone camera while connected to the store Wi-Fi!</p>
+                <p style="font-size:12px; color:#666;">Scan with your phone camera to open the store!</p>
             </div>
 
         {% elif view == 'products' %}
@@ -262,6 +262,8 @@ def logout():
     session.clear()
     return redirect(url_for('customer_home'))
 
+# This will initialize the tables perfectly both locally and on Render
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     app.run(host='0.0.0.0', port=5000)
