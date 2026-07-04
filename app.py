@@ -1,6 +1,7 @@
 import os
 import sqlite3
-from flask import Flask, render_template_string, request, redirect, session, url_for
+import json
+from flask import Flask, render_template_string, request, redirect, session, url_for, flash
 import qrcode
 import io
 import base64
@@ -8,14 +9,14 @@ import base64
 app = Flask(__name__)
 app.secret_key = 'super_secret_grocery_key_2026'
 
-# Directs your scanned QR code straight to your store menu page
-PRODUCTION_STORE_URL = "https://kfm-cjav.onrender.com/customer"
+PRODUCTION_STORE_URL = "http://127.0.0.1:5000/customer"
 
 def init_db():
-    # If running on Render, use the writable /tmp folder, otherwise use local directory
     db_path = '/tmp/grocery.db' if os.environ.get('RENDER') else 'grocery.db'
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
+    
+    # 1. Products Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,41 +24,42 @@ def init_db():
             name TEXT NOT NULL,
             mrp REAL NOT NULL,
             sale_price REAL NOT NULL,
-            instructions TEXT
+            instructions TEXT,
+            stock INTEGER DEFAULT 10
         )
     ''')
+    
+    # 2. Orders Table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            address TEXT NOT NULL,
+            items_json TEXT NOT NULL,
+            total_amount REAL NOT NULL,
+            order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Handle Migrations
+    cursor.execute("PRAGMA table_info(products)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'stock' not in columns:
+        cursor.execute("ALTER TABLE products ADD COLUMN stock INTEGER DEFAULT 10")
+        conn.commit()
+
     cursor.execute('SELECT COUNT(*) FROM products')
     if cursor.fetchone()[0] == 0:
         cursor.executemany('''
-            INSERT INTO products (category, name, mrp, sale_price, instructions)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO products (category, name, mrp, sale_price, instructions, stock)
+            VALUES (?, ?, ?, ?, ?, ?)
         ''', [
-            ('Oils', 'Fortune Mustard Oil 1L', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Oils', 'Hathi Mustard Oil 1L', 200.00, 178.00, 'Perfect for traditional Indian cooking.'),
-            ('Spices', 'Catch Turmeric Powder 200g', 60.00, 52.00, 'Keep airtight after opening.'),
-            ('Oils', 'Nav Bhumi Ras Mustard Oil 1L', 190.00, 178.00, 'Store in a cool dry place.'),
-            ('Oils', 'Saloni Mustard Oil 1L', 190.00, 180.00, 'Store in a cool dry place.'),
-            ('Oils', 'Fortune Mustard Oil 1L', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Spices', 'Mirch 100g', 90.00, 175.00, 'Store in a cool dry place.'),
-            ('Spices', 'Dhania 100g', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Spices', 'Catch Turmeric Powder 200g', 60.00, 52.00, 'Keep airtight after opening.'),
-            ('Spices', 'Jeera 100g', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Dairy', 'Milk 1L', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Dairy', 'Cheese 200g', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Dairy', 'Butter 250g', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Dairy', 'Yogurt 500g', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Dairy', 'Curd 250g', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Dairy', 'Ghee 250g', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Dairy', 'Cream 250g', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Dairy', 'Buttermilk 500g', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Atta', 'Aashirwad Atta 10kg', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Atta', 'Aashirwad Atta 5kg', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Atta', 'Fortune Atta 10kg', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Atta', 'Fortune Atta 5kg', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Atta', 'Bhajan Atta 10kg', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Atta', 'Bhajan Atta 5kg', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Atta', 'Swastik Atta 10kg', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Atta', 'Swastik Atta 5kg', 190.00, 175.00, 'Store in a cool dry place.')
+            ('Oils', 'Fortune Mustard Oil 1L', 190.00, 176.00, 'Store in a cool dry place.', 15),
+            ('Oils', 'Hathi Mustard Oil 1L', 200.00, 178.00, 'Perfect for traditional Indian cooking.', 8),
+            ('Spices', 'Catch Turmeric Powder 200g', 60.00, 52.00, 'Keep airtight after opening.', 25),
+            ('Dairy', 'Milk 1L', 70.00, 65.00, 'Store in a cool dry place.', 20),
+            ('Dairy', 'Cheese 200g', 135.00, 130.00, 'Store in a cool dry place.', 5),
+            ('Atta', 'Aashirwad Atta 10kg', 500.00, 450.00, 'Store in a cool dry place.', 12)
         ])
     conn.commit()
     conn.close()
@@ -82,7 +84,8 @@ def generate_qr_base64():
     img.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-HTML_TEMPLATE = """
+# --- MAIN SEGREGATED BASE HTML TEMPLATE STRUCTURE ---
+HTML_TEMPLATE_BASE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -90,187 +93,97 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Grocery Store</title>
     <style>
-        :root { --primary: #2e7d32; --secondary: #388e3c; --bg: #f1f8e9; }
+        :root { --primary: #2e7d32; --secondary: #388e3c; --bg: #f1f8e9; --danger: #c62828; }
         body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 20px; background: var(--bg); color: #333; }
-        header { display: flex; justify-content: space-between; align-items: center; background: var(--primary); color: white; padding: 15px 20px; border-radius: 8px; margin-bottom: 20px; }
-        header a { color: white; text-decoration: none; font-weight: bold; }
-        .container { max-width: 800px; margin: 0 auto; }
+        header { display: flex; align-items: center; justify-content: space-between; background: var(--primary); color: white; padding: 15px 20px; border-radius: 8px; margin-bottom: 20px; position: relative; }
+        header h1 { margin: 0; font-size: 22px; display: flex; align-items: center; gap: 10px; }
+        .menu-btn { background: none; border: none; color: white; font-size: 24px; cursor: pointer; padding: 5px; }
+        .nav-menu { position: fixed; top: 0; left: -280px; width: 280px; height: 100%; background: white; box-shadow: 4px 0 10px rgba(0,0,0,0.1); z-index: 1000; transition: 0.3s ease; padding: 20px; box-sizing: border-box; }
+        .nav-menu.active { left: 0; }
+        .nav-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); z-index: 999; display: none; }
+        .nav-overlay.active { display: block; }
+        .nav-menu h3 { margin-top: 0; border-bottom: 2px solid var(--primary); padding-bottom: 10px; color: var(--primary); }
+        .nav-menu a { display: block; padding: 12px 10px; color: #333; text-decoration: none; border-radius: 4px; margin-bottom: 5px; font-weight: 500; }
+        .nav-menu a:hover { background: #e8f5e9; color: var(--primary); }
+        .container { max-width: 900px; margin: 0 auto; }
         .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; }
-        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); text-align: center; cursor: pointer; transition: transform 0.2s; border: 1px solid #e0e0e0; }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); text-align: center; cursor: pointer; transition: transform 0.2s; border: 1px solid #e0e0e0; position: relative; }
         .card:hover { transform: translateY(-3px); box-shadow: 0 6px 12px rgba(0,0,0,0.1); }
-        .btn { background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
+        .btn { background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; text-align: center; }
         .btn-back { background: #616161; margin-bottom: 20px; }
-        .btn-edit { background: #ff9100; color: white; padding: 4px 10px; font-size: 13px; border-radius: 4px; text-decoration: none; display: inline-block; }
+        .btn-disabled { background: #bdc3c7; cursor: not-allowed; }
+        .btn-edit { background: #ff9100; color: white; padding: 4px 10px; font-size: 13px; border-radius: 4px; text-decoration: none; }
         .price-tag { font-size: 24px; color: var(--primary); font-weight: bold; margin: 10px 0; }
         .mrp { text-decoration: line-through; color: #757575; font-size: 16px; }
+        .badge { background: var(--danger); color: white; padding: 4px 8px; font-size: 12px; border-radius: 4px; font-weight: bold; display: inline-block; }
+        .badge-success { background: var(--primary); }
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: bold; }
         input, textarea, select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
-        .qr-box { background: white; padding: 30px; border-radius: 12px; text-align: center; max-width: 400px; margin: 40px auto; }
+        .qty-input { width: 80px; text-align: center; display: inline-block; margin-right: 10px; }
+        .alert { background: #ffcdd2; color: #b71c1c; padding: 12px; border-radius: 6px; margin-bottom: 20px; border-left: 5px solid var(--danger); }
+        .alert-info { background: #e3f2fd; color: #0d47a1; border-left: 5px solid #2196f3; }
         table { width: 100%; border-collapse: collapse; margin-top: 15px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
         th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #eee; }
         th { background: #e8f5e9; color: var(--primary); font-weight: bold; }
+        .report-box { display: flex; gap: 20px; margin-bottom: 30px; }
+        .report-card { background: white; padding: 20px; border-radius: 8px; flex: 1; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; border-top: 4px solid var(--primary); }
     </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>🏪 Khandelwal Food Mart </h1>
-            <div>
-                {% if session.get('logged_in') %}
-                    <a href="/admin/dashboard">Dashboard</a> | <a href="/logout">Logout</a>
-                {% else %}
-                    <a href="/admin/login">Store Admin Login</a>
-                {% endif %}
-            </div>
-        </header>
-
-        {% if view == 'categories' %}
-            <h2>Select a Category</h2>
-            <div class="card-grid">
-                {% for cat in data %}
-                    <div class="card" onclick="location.href='/customer/category/{{ cat }}'">
-                        <h3>{{ cat }}</h3>
-                        <p style="color: var(--secondary);">Browse Products →</p>
-                    </div>
-                {% endfor %}
-            </div>
-            
-            <div class="qr-box">
-                <h3>Your Shop QR Code</h3>
-                <img src="data:image/png;base64,{{ qr_img }}" alt="Scan QR Code" style="width:200px;height:200px;"/>
-                <p style="font-size:12px; color:#666;">Scan with your phone camera to open the store!</p>
-            </div>
-
-        {% elif view == 'products' %}
-            <a href="/customer" class="btn btn-back">← Back to Categories</a>
-            <h2>{{ current_category }} Items</h2>
-            <div class="card-grid">
-                {% for prod in data %}
-                    <div class="card" onclick="location.href='/customer/product/{{ prod.id }}'">
-                        <h3>{{ prod.name }}</h3>
-                        <div class="price-tag">₹{{ prod.sale_price }}</div>
-                    </div>
-                {% endfor %}
-            </div>
-
-        {% elif view == 'description' %}
-            <a href="/customer/category/{{ data.category }}" class="btn btn-back">← Back to Product List</a>
-            <div class="card" style="text-align: left; cursor: default;">
-                <h2 style="margin-top:10px;">{{ data.name }}</h2>
-                <hr style="border: 0; border-top: 1px solid #eee;">
-                <div class="price-tag">Special Price: ₹{{ data.sale_price }}</div>
-                <div class="mrp">Normal MRP: ₹{{ data.mrp }}</div>
-                <h3 style="margin-top: 25px; color: var(--secondary);">Instructions:</h3>
-                <p style="line-height: 1.6; background: #fafafa; padding: 15px; border-left: 4px solid var(--primary);">{{ data.instructions }}</p>
-            </div>
-
-        {% elif view == 'login' %}
-            <div class="card" style="max-width: 400px; margin: 40px auto; text-align: left;">
-                <h2>Admin Management Portal</h2>
-                {% if error %}<p style="color:red;">{{ error }}</p>{% endif %}
-                <form action="/admin/login" method="post">
-                    <div class="form-group">
-                        <label>Admin Username</label>
-                        <input type="text" name="username" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Password</label>
-                        <input type="password" name="password" required>
-                    </div>
-                    <button type="submit" class="btn" style="width:100%;">Unlock Dashboard</button>
-                </form>
-            </div>
-
-        {% elif view == 'dashboard' %}
-            <h2>Welcome Back, Owner! Add New Products Below:</h2>
-            <div class="card" style="text-align: left; margin-bottom: 30px;">
-                <form action="/admin/add" method="post">
-                    <div class="form-group">
-                        <label>Product Category</label>
-                        <input type="text" name="category" placeholder="Oils" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Product Brand Name & Size</label>
-                        <input type="text" name="name" placeholder="Fortune Premium Mustard Oil 1L" required>
-                    </div>
-                    <div class="form-group" style="display: flex; gap: 10px;">
-                        <div style="flex: 1;">
-                            <label>MRP (₹)</label>
-                            <input type="number" step="0.01" name="mrp" required>
-                        </div>
-                        <div style="flex: 1;">
-                            <label>Sale Price (₹)</label>
-                            <input type="number" step="0.01" name="sale_price" required>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Customer Instructions</label>
-                        <textarea name="instructions" rows="3" required></textarea>
-                    </div>
-                    <button type="submit" class="btn">➕ Add to Digital Menu</button>
-                </form>
-            </div>
-
-            <h2>Current Inventory Items (Click Edit to modify)</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Category</th>
-                        <th>Name</th>
-                        <th>MRP</th>
-                        <th>Sale Price</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for prod in data %}
-                    <tr>
-                        <td>{{ prod.category }}</td>
-                        <td>{{ prod.name }}</td>
-                        <td>₹{{ prod.mrp }}</td>
-                        <td>₹{{ prod.sale_price }}</td>
-                        <td><a href="/admin/edit/{{ prod.id }}" class="btn-edit">✏️ Edit</a></td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-
-        {% elif view == 'edit' %}
-            <a href="/admin/dashboard" class="btn btn-back">← Back to Dashboard</a>
-            <h2>Modify Product Details</h2>
-            <div class="card" style="text-align: left;">
-                <form action="/admin/update/{{ data.id }}" method="post">
-                    <div class="form-group">
-                        <label>Product Category</label>
-                        <input type="text" name="category" value="{{ data.category }}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Product Brand Name & Size</label>
-                        <input type="text" name="name" value="{{ data.name }}" required>
-                    </div>
-                    <div class="form-group" style="display: flex; gap: 10px;">
-                        <div style="flex: 1;">
-                            <label>MRP (₹)</label>
-                            <input type="number" step="0.01" name="mrp" value="{{ data.mrp }}" required>
-                        </div>
-                        <div style="flex: 1;">
-                            <label>Sale Price (₹)</label>
-                            <input type="number" step="0.01" name="sale_price" value="{{ data.sale_price }}" required>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Customer Instructions</label>
-                        <textarea name="instructions" rows="3" required>{{ data.instructions }}</textarea>
-                    </div>
-                    <button type="submit" class="btn" style="background: #ff9100;">💾 Save Changes</button>
-                </form>
-            </div>
+    <div class="nav-overlay" id="navOverlay" onclick="toggleMenu()"></div>
+    <div class="nav-menu" id="navMenu">
+        <h3>Store Navigation</h3>
+        <a href="/customer">🏪 Shop Categories</a>
+        <a href="/cart">🛒 View Shopping Cart</a>
+        <hr style="border:0; border-top: 1px solid #eee; margin: 15px 0;">
+        {% if is_logged_in %}
+            <a href="/admin/dashboard">📊 Admin Dashboard</a>
+            <a href="/logout">🚪 Logout</a>
+        {% else %}
+            <a href="/admin/login">🔑 Admin Login</a>
         {% endif %}
     </div>
+
+    <div class="container">
+        <header>
+            <button class="menu-btn" onclick="toggleMenu()">☰</button>
+            <h1>🏪 Khandelwal Food Mart</h1>
+            <a href="/cart" style="color: white; text-decoration: none; font-weight: bold;">🛒 Cart</a>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for category, msg in messages %}
+              <div class="alert {% if category == 'info' %}alert-info{% endif %}">{{ msg }}</div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+
+        <!-- INJECTED DYNAMIC CONTENT -->
+        {{ view_content | safe }}
+    </div>
+
+    <script>
+        function toggleMenu() {
+            document.getElementById('navMenu').classList.toggle('active');
+            document.getElementById('navOverlay').classList.toggle('active');
+        }
+    </script>
 </body>
 </html>
 """
+
+def render_store_page(view_content_template, context_data=None):
+    if context_data is None:
+        context_data = {}
+    context_data['is_logged_in'] = session.get('logged_in', False)
+    
+    # Inject specific page views directly into base shell layout safely
+    full_compiled_page = HTML_TEMPLATE_BASE.replace("{{ view_content | safe }}", view_content_template)
+    return render_template_string(full_compiled_page, **context_data)
+
+# --- CUSTOMER CONTROLLER / ROUTING ---
 
 @app.route('/')
 def index():
@@ -281,40 +194,378 @@ def customer_home():
     cats = query_db('SELECT DISTINCT category FROM products')
     categories_list = [row['category'] for row in cats]
     qr_img = generate_qr_base64()
-    return render_template_string(HTML_TEMPLATE, view='categories', data=categories_list, qr_img=qr_img)
+    
+    content = """
+    <h2>Select a Category</h2>
+    <div class="card-grid">
+        {% for cat in categories %}
+            <div class="card" onclick="location.href='/customer/category/{{ cat }}'">
+                <h3>{{ cat }}</h3>
+                <p style="color: var(--secondary);">Browse Products →</p>
+            </div>
+        {% endfor %}
+    </div>
+    
+    <div style="background: white; padding: 30px; border-radius: 12px; text-align: center; max-width: 400px; margin: 40px auto; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+        <h3>Your Shop QR Code</h3>
+        <img src="data:image/png;base64,{{ qr_img }}" alt="Scan QR Code" style="width:200px;height:200px;"/>
+        <p style="font-size:12px; color:#666;">Scan with your phone camera to share the store menu!</p>
+    </div>
+    """
+    return render_store_page(content, {'categories': categories_list, 'qr_img': qr_img})
 
 @app.route('/customer/category/<cat_name>')
 def customer_category(cat_name):
     prods = query_db('SELECT * FROM products WHERE category = ?', [cat_name])
-    return render_template_string(HTML_TEMPLATE, view='products', data=prods, current_category=cat_name)
+    content = """
+    <a href="/customer" class="btn btn-back">← Back to Categories</a>
+    <h2>{{ current_category }} Items</h2>
+    <div class="card-grid">
+        {% for prod in data %}
+            <div class="card" onclick="location.href='/customer/product/{{ prod[\'id\'] }}'">
+                <h3>{{ prod[\'name\'] }}</h3>
+                <div class="price-tag">₹{{ prod[\'sale_price\'] }}</div>
+                {% if prod[\'stock\'] <= 0 %}
+                    <span class="badge">Out of Stock</span>
+                {% else %}
+                    <span class="badge badge-success">In Stock ({{ prod[\'stock\'] }})</span>
+                {% endif %}
+            </div>
+        {% endfor %}
+    </div>
+    """
+    return render_store_page(content, {'data': prods, 'current_category': cat_name})
 
 @app.route('/customer/product/<int:prod_id>')
 def customer_product(prod_id):
     prod = query_db('SELECT * FROM products WHERE id = ?', [prod_id], one=True)
-    return render_template_string(HTML_TEMPLATE, view='description', data=prod)
+    content = """
+    <a href="/customer/category/{{ data[\'category\'] }}" class="btn btn-back">← Back to Product List</a>
+    <div class="card" style="text-align: left; cursor: default;">
+        <h2 style="margin-top:10px;">{{ data[\'name\'] }}</h2>
+        <hr style="border: 0; border-top: 1px solid #eee;">
+        <div class="price-tag">Special Price: ₹{{ data[\'sale_price\'] }}</div>
+        <div class="mrp">Normal MRP: ₹{{ data[\'mrp\'] }}</div>
+        
+        <h3 style="margin-top: 25px; color: var(--secondary);">Instructions:</h3>
+        <p style="line-height: 1.6; background: #fafafa; padding: 15px; border-left: 4px solid var(--primary); margin-bottom: 25px;">{{ data[\'instructions\'] }}</p>
+        
+        {% if data[\'stock\'] <= 0 %}
+            <div class="badge" style="font-size: 16px; padding: 10px;">⚠️ Currently Out of Stock</div>
+        {% else %}
+            <form action="/cart/add/{{ data[\'id\'] }}" method="post" style="background: #f9f9f9; padding: 15px; border-radius: 8px; display: inline-block;">
+                <label for="quantity" style="display:inline; margin-right:10px;">Quantity:</label>
+                <input type="number" name="quantity" id="quantity" class="qty-input" value="1" min="1" max="{{ data[\'stock\'] }}">
+                <button type="submit" class="btn">🛒 Add to Cart</button>
+                <span style="font-size:12px; color:#666; margin-left:10px;">({{ data[\'stock\'] }} items available)</span>
+            </form>
+        {% endif %}
+    </div>
+    """
+    return render_store_page(content, {'data': prod})
+
+@app.route('/cart')
+def view_cart():
+    cart = session.get('cart', {})
+    cart_items = []
+    cart_total = 0.0
+    
+    if cart:
+        placeholders = ','.join('?' for _ in cart.keys())
+        products = query_db(f'SELECT * FROM products WHERE id IN ({placeholders})', list(cart.keys()))
+        for p in products:
+            p_id = str(p['id'])
+            qty = int(cart[p_id])
+            total_item_cost = p['sale_price'] * qty
+            cart_total += total_item_cost
+            cart_items.append({
+                'id': p['id'], 'name': p['name'], 'price': p['sale_price'],
+                'qty': qty, 'total': round(total_item_cost, 2)
+            })
+            
+    content = """
+    <h2>🛒 Your Shopping Cart</h2>
+    {% if not cart_items %}
+        <div class="card" style="padding: 40px; text-align: center;">
+            <h3>Your cart is empty!</h3>
+            <a href="/customer" class="btn" style="margin-top: 15px;">Start Browsing Products</a>
+        </div>
+    {% else %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Item Name</th>
+                    <th>Price</th>
+                    <th>Quantity</th>
+                    <th>Total</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in cart_items %}
+                <tr>
+                    <td>{{ item.name }}</td>
+                    <td>₹{{ item.price }}</td>
+                    <td>{{ item.qty }}</td>
+                    <td>₹{{ item.total }}</td>
+                    <td><a href="/cart/remove/{{ item.id }}" style="color: var(--danger); text-decoration: none; font-weight: bold;">Remove</a></td>
+                </tr>
+                {% endfor %}
+                <tr style="font-weight: bold; background: #fafafa;">
+                    <td colspan="3" style="text-align: right;">Cart Total:</td>
+                    <td colspan="2" style="color: var(--primary); font-size: 18px;">₹{{ cart_total }}</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="card" style="text-align: left; margin-top: 30px;">
+            <h3>🚚 Cash on Delivery (COD) Home Delivery</h3>
+            <p style="font-size: 14px; color: #555;">* Orders must be at least <strong>₹1500</strong> to qualify for delivery setup.</p>
+            
+            {% if cart_total < 1500 %}
+                <div class="alert" style="margin-bottom: 0;">
+                    <strong>Order Blocked:</strong> You need an additional <strong>₹{{ 1500 - cart_total }}</strong> to meet the minimum placement amount.
+                </div>
+                <button class="btn btn-disabled" style="width: 100%; margin-top: 15px;" disabled>Minimum Limit Unmet</button>
+            {% else %}
+                <form action="/cart/checkout" method="post" style="margin-top: 15px;">
+                    <div class="form-group">
+                        <label>Mobile Phone Number</label>
+                        <input type="tel" name="phone" placeholder="Enter 10-digit mobile number" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Full Delivery Address</label>
+                        <textarea name="address" rows="3" placeholder="Enter your full home drop-off location address" required></textarea>
+                    </div>
+                    <button type="submit" class="btn" style="width: 100%; background: var(--secondary);">📦 Place Cash on Delivery Order</button>
+                </form>
+            {% endif %}
+        </div>
+    {% endif %}
+    """
+    return render_store_page(content, {'cart_items': cart_items, 'cart_total': round(cart_total, 2)})
+
+@app.route('/cart/add/<int:prod_id>', methods=['POST'])
+def add_to_cart(prod_id):
+    quantity = int(request.form.get('quantity', 1))
+    prod = query_db('SELECT * FROM products WHERE id = ?', [prod_id], one=True)
+    
+    if not prod or prod['stock'] <= 0:
+        flash("Sorry, this item is currently out of stock!", "error")
+        return redirect(url_for('customer_home'))
+        
+    cart = session.get('cart', {})
+    current_in_cart = cart.get(str(prod_id), 0)
+    new_quantity = current_in_cart + quantity
+    
+    if new_quantity > prod['stock']:
+        flash(f"Cannot add requested amount. Max available inventory left is {prod['stock']}.", "error")
+        cart[str(prod_id)] = prod['stock']
+    else:
+        cart[str(prod_id)] = new_quantity
+        flash(f"Added {quantity} x {prod['name']} to your cart!", "info")
+        
+    session['cart'] = cart
+    return redirect(url_for('view_cart'))
+
+@app.route('/cart/remove/<string:prod_id>')
+def remove_from_cart(prod_id):
+    cart = session.get('cart', {})
+    if prod_id in cart:
+        cart.pop(prod_id)
+    session['cart'] = cart
+    flash("Item removed from your basket.", "info")
+    return redirect(url_for('view_cart'))
+
+@app.route('/cart/checkout', methods=['POST'])
+def checkout_cart():
+    cart = session.get('cart', {})
+    if not cart:
+        return redirect(url_for('customer_home'))
+        
+    phone = request.form.get('phone', '').strip()
+    address = request.form.get('address', '').strip()
+    
+    placeholders = ','.join('?' for _ in cart.keys())
+    products = query_db(f'SELECT * FROM products WHERE id IN ({placeholders})', list(cart.keys()))
+    
+    cart_total = 0.0
+    items_summary_list = []
+    
+    for p in products:
+        p_id = str(p['id'])
+        qty = int(cart[p_id])
+        if qty > p['stock']:
+            flash(f"Stock constraint issue encountered: '{p['name']}' has only {p['stock']} remaining units. Adjusting cart.", "error")
+            return redirect(url_for('view_cart'))
+        cart_total += (p['sale_price'] * qty)
+        items_summary_list.append(f"{p['name']} (x{qty})")
+        
+    if cart_total < 1500:
+        flash("Checkout aborted. System minimum limits require orders over ₹1500.", "error")
+        return redirect(url_for('view_cart'))
+        
+    for p in products:
+        p_id = str(p['id'])
+        qty = int(cart[p_id])
+        query_db('UPDATE products SET stock = stock - ? WHERE id = ?', [qty, int(p_id)])
+        
+    items_summary_str = ", ".join(items_summary_list)
+    query_db('INSERT INTO orders (phone, address, items_json, total_amount) VALUES (?, ?, ?, ?)',
+             [phone, address, items_summary_str, cart_total])
+             
+    session.pop('cart', None)
+    flash("Success! Your Cash on Delivery order has been registered.", "info")
+    return redirect(url_for('customer_home'))
+
+# --- ADMIN SIDE INTERFACE LOGIC ---
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
+    error_msg = None
     if request.method == 'POST':
         if request.form['username'] == 'kfm' and request.form['password'] == '114251':
             session['logged_in'] = True
             return redirect(url_for('admin_dashboard'))
-        return render_template_string(HTML_TEMPLATE, view='login', error='Incorrect password!')
-    return render_template_string(HTML_TEMPLATE, view='login')
+        error_msg = 'Incorrect password!'
+        
+    content = """
+    <div class="card" style="max-width: 400px; margin: 40px auto; text-align: left;">
+        <h2>Admin Management Portal</h2>
+        {% if error %}<p style="color:red;">{{ error }}</p>{% endif %}
+        <form action="/admin/login" method="post">
+            <div class="form-group">
+                <label>Admin Username</label>
+                <input type="text" name="username" required>
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" name="password" required>
+            </div>
+            <button type="submit" class="btn" style="width:100%;">Unlock Dashboard</button>
+        </form>
+    </div>
+    """
+    return render_store_page(content, {'error': error_msg})
 
 @app.route('/admin/dashboard')
 def admin_dashboard():
     if not session.get('logged_in'):
         return redirect(url_for('admin_login'))
+        
     all_products = query_db('SELECT * FROM products ORDER BY category, name')
-    return render_template_string(HTML_TEMPLATE, view='dashboard', data=all_products)
+    orders = query_db('SELECT * FROM orders ORDER BY order_date DESC')
+    sales_agg = query_db('SELECT SUM(total_amount) as total, COUNT(id) as count FROM orders', one=True)
+    
+    report = {
+        'total_sales': round(sales_agg['total'], 2) if sales_agg['total'] else 0.0,
+        'total_orders': sales_agg['count'] if sales_agg['count'] else 0
+    }
+    
+    content = """
+    <h2>📊 Store Administration Panel</h2>
+    <div class="report-box">
+        <div class="report-card">
+            <h3>Gross Store Revenue</h3>
+            <p style="font-size: 28px; color: var(--primary); font-weight: bold; margin: 5px 0;">₹{{ report.total_sales }}</p>
+            <span style="font-size: 12px; color: #666;">All completed COD deliveries</span>
+        </div>
+        <div class="report-card">
+            <h3>Dispatched Shipments</h3>
+            <p style="font-size: 28px; color: var(--secondary); font-weight: bold; margin: 5px 0;">{{ report.total_orders }}</p>
+            <span style="font-size: 12px; color: #666;">Total incoming orders recorded</span>
+        </div>
+    </div>
+
+    <h2>🚚 Incoming Home Delivery Dispatches</h2>
+    {% if not active_orders %}
+        <p style="background: white; padding: 20px; border-radius: 8px; color: #666;">No customer delivery orders placed yet.</p>
+    {% else %}
+        {% for order in active_orders %}
+            <div class="card" style="text-align: left; margin-bottom: 15px; border-left: 5px solid var(--secondary); cursor: default;">
+                <strong>Order #{{ order[\'id\'] }} — Total: ₹{{ order[\'total_amount\'] }}</strong><br>
+                <span style="font-size: 13px; color: #666;">Placed Date: {{ order[\'order_date\'] }}</span>
+                <p style="margin: 8px 0;">📞 <strong>Phone:</strong> {{ order[\'phone\'] }} | 📍 <strong>Address:</strong> {{ order[\'address\'] }}</p>
+                <div style="background: #fcfcfc; padding: 10px; border-radius: 4px; font-size: 14px;">
+                    <strong>Basket:</strong> {{ order[\'items_json\'] }}
+                </div>
+            </div>
+        {% endfor %}
+    {% endif %}
+    
+    <hr style="border:0; border-top: 1px solid #ccc; margin: 40px 0;">
+
+    <h2>➕ Add New Catalog Product</h2>
+    <div class="card" style="text-align: left; margin-bottom: 30px;">
+        <form action="/admin/add" method="post">
+            <div class="form-group">
+                <label>Product Category</label>
+                <input type="text" name="category" placeholder="Oils" required>
+            </div>
+            <div class="form-group">
+                <label>Product Brand Name & Size</label>
+                <input type="text" name="name" placeholder="Fortune Premium Mustard Oil 1L" required>
+            </div>
+            <div class="form-group" style="display: flex; gap: 10px;">
+                <div style="flex: 1;">
+                    <label>MRP (₹)</label>
+                    <input type="number" step="0.01" name="mrp" required>
+                </div>
+                <div style="flex: 1;">
+                    <label>Sale Price (₹)</label>
+                    <input type="number" step="0.01" name="sale_price" required>
+                </div>
+                <div style="flex: 1;">
+                    <label>Initial Stock Count</label>
+                    <input type="number" name="stock" value="10" min="0" required>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Customer Instructions</label>
+                <textarea name="instructions" rows="3" required></textarea>
+            </div>
+            <button type="submit" class="btn">➕ Add to Digital Menu</button>
+        </form>
+    </div>
+
+    <h2>Current Inventory Listing</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Category</th>
+                <th>Name</th>
+                <th>Sale Price</th>
+                <th>Stock Units</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for prod in data %}
+            <tr>
+                <td>{{ prod[\'category\'] }}</td>
+                <td>{{ prod[\'name\'] }}</td>
+                <td>₹{{ prod[\'sale_price\'] }}</td>
+                <td>
+                    {% if prod[\'stock\'] <= 0 %}
+                        <span class="badge">0 (Out of Stock)</span>
+                    {% else %}
+                        {{ prod[\'stock\'] }} units
+                    {% endif %}
+                </td>
+                <td><a href="/admin/edit/{{ prod[\'id\'] }}" class="btn-edit">✏️ Edit</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    """
+    return render_store_page(content, {'data': all_products, 'active_orders': orders, 'report': report})
 
 @app.route('/admin/add', methods=['POST'])
 def add_product():
     if not session.get('logged_in'):
         return redirect(url_for('admin_login'))
-    query_db('INSERT INTO products (category, name, mrp, sale_price, instructions) VALUES (?, ?, ?, ?, ?)',
-             [request.form['category'].strip(), request.form['name'].strip(), float(request.form['mrp']), float(request.form['sale_price']), request.form['instructions'].strip()])
+    query_db('INSERT INTO products (category, name, mrp, sale_price, instructions, stock) VALUES (?, ?, ?, ?, ?, ?)',
+             [request.form['category'].strip(), request.form['name'].strip(), float(request.form['mrp']), float(request.form['sale_price']), request.form['instructions'].strip(), int(request.form['stock'])])
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/edit/<int:prod_id>')
@@ -322,7 +573,43 @@ def edit_product(prod_id):
     if not session.get('logged_in'):
         return redirect(url_for('admin_login'))
     prod = query_db('SELECT * FROM products WHERE id = ?', [prod_id], one=True)
-    return render_template_string(HTML_TEMPLATE, view='edit', data=prod)
+    
+    content = """
+    <a href="/admin/dashboard" class="btn btn-back">← Back to Dashboard</a>
+    <h2>Modify Product & Stock Controls</h2>
+    <div class="card" style="text-align: left;">
+        <form action="/admin/update/{{ data[\'id\'] }}" method="post">
+            <div class="form-group">
+                <label>Product Category</label>
+                <input type="text" name="category" value="{{ data[\'category\'] }}" required>
+            </div>
+            <div class="form-group">
+                <label>Product Brand Name & Size</label>
+                <input type="text" name="name" value="{{ data[\'name\'] }}" required>
+            </div>
+            <div class="form-group" style="display: flex; gap: 10px;">
+                <div style="flex: 1;">
+                    <label>MRP (₹)</label>
+                    <input type="number" step="0.01" name="mrp" value="{{ data[\'mrp\'] }}" required>
+                </div>
+                <div style="flex: 1;">
+                    <label>Sale Price (₹)</label>
+                    <input type="number" step="0.01" name="sale_price" value="{{ data[\'sale_price\'] }}" required>
+                </div>
+                <div style="flex: 1; background: #fffde7; padding: 5px; border-radius: 6px;">
+                    <label style="color: #b76e00;">📦 Warehouse Stock Units</label>
+                    <input type="number" name="stock" value="{{ data[\'stock\'] }}" min="0" required>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Customer Instructions</label>
+                <textarea name="instructions" rows="3" required>{{ data[\'instructions\'] }}</textarea>
+            </div>
+            <button type="submit" class="btn" style="background: #ff9100;">💾 Save Changes</button>
+        </form>
+    </div>
+    """
+    return render_store_page(content, {'data': prod})
 
 @app.route('/admin/update/<int:prod_id>', methods=['POST'])
 def update_product(prod_id):
@@ -330,15 +617,12 @@ def update_product(prod_id):
         return redirect(url_for('admin_login'))
     query_db('''
         UPDATE products 
-        SET category = ?, name = ?, mrp = ?, sale_price = ?, instructions = ? 
+        SET category = ?, name = ?, mrp = ?, sale_price = ?, instructions = ?, stock = ?
         WHERE id = ?
     ''', [
-        request.form['category'].strip(),
-        request.form['name'].strip(),
-        float(request.form['mrp']),
-        float(request.form['sale_price']),
-        request.form['instructions'].strip(),
-        prod_id
+        request.form['category'].strip(), request.form['name'].strip(),
+        float(request.form['mrp']), float(request.form['sale_price']),
+        request.form['instructions'].strip(), int(request.form['stock']), prod_id
     ])
     return redirect(url_for('admin_dashboard'))
 
@@ -347,7 +631,6 @@ def logout():
     session.clear()
     return redirect(url_for('customer_home'))
 
-# This initializes tables correctly both locally and on Render
 init_db()
 
 if __name__ == '__main__':
