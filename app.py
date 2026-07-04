@@ -296,7 +296,7 @@ def customer_product(prod_id):
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     if request.method == 'POST':
-        if request.form['username'] == 'admin' and request.form['password'] == 'grocerystore2026':
+        if request.form['username'] == 'kfm' and request.form['password'] == '114251':
             session['logged_in'] = True
             return redirect(url_for('admin_dashboard'))
         return render_template_string(HTML_TEMPLATE, view='login', error='Incorrect password!')
