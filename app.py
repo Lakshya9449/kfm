@@ -9,10 +9,12 @@ app = Flask(__name__)
 app.secret_key = 'super_secret_grocery_key_2026'
 
 # Make sure your phone is connected to the same Wi-Fi network as this computer!
-PRODUCTION_STORE_URL = "http://10.157.138.187:5000/customer"
+PRODUCTION_STORE_URL = "https://kfm-cjav.onrender.com/customer"
 
 def init_db():
-    conn = sqlite3.connect('grocery.db')
+    # If running on Render, use the writable /tmp folder, otherwise use local directory
+    db_path = '/tmp/grocery.db' if os.environ.get('RENDER') else 'grocery.db'
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
@@ -29,14 +31,14 @@ def init_db():
         cursor.executemany('''
             INSERT INTO products (category, name, mrp, sale_price, instructions)
             VALUES (?, ?, ?, ?, ?)
-        ''', [ # <--- FIX 1: Added the missing comma here before the list brackets
+        ''', [
             ('Oils', 'Fortune Mustard Oil 1L', 190.00, 175.00, 'Store in a cool dry place.'),
             ('Oils', 'Hathi Mustard Oil 1L', 200.00, 178.00, 'Perfect for traditional Indian cooking.'),
             ('Spices', 'Catch Turmeric Powder 200g', 60.00, 52.00, 'Keep airtight after opening.'),
             ('Oils', 'Nav Bhumi Ras Mustard Oil 1L', 190.00, 178.00, 'Store in a cool dry place.'),
             ('Oils', 'Saloni Mustard Oil 1L', 190.00, 180.00, 'Store in a cool dry place.'),
             ('Oils', 'Fortune Mustard Oil 1L', 190.00, 175.00, 'Store in a cool dry place.'),
-            ('Spices', 'Mirch 100g', 90.00, 175.00, 'Store in a cool dry place.'), # <--- FIX 2: Added missing MRP (90.00) so it has all 5 values
+            ('Spices', 'Mirch 100g', 90.00, 175.00, 'Store in a cool dry place.'),
             ('Spices', 'Dhania 100g', 190.00, 175.00, 'Store in a cool dry place.'),
             ('Spices', 'Catch Turmeric Powder 200g', 60.00, 52.00, 'Keep airtight after opening.'),
             ('Spices', 'Jeera 100g', 190.00, 175.00, 'Store in a cool dry place.'),
@@ -61,7 +63,8 @@ def init_db():
     conn.close()
 
 def query_db(query, args=(), one=False):
-    conn = sqlite3.connect('grocery.db')
+    db_path = '/tmp/grocery.db' if os.environ.get('RENDER') else 'grocery.db'
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute(query, args)
