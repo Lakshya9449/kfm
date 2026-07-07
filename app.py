@@ -9,11 +9,20 @@ import base64
 app = Flask(__name__)
 app.secret_key = 'super_secret_grocery_key_2026'
 
-PRODUCTION_STORE_URL = "http://127.0.0.1:5000/customer"
+# Centralized data file path setup
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+DATABASE = os.path.join(BASE_DIR, 'grocery.db')
+
+# Configured directly for your live Render application url
+PRODUCTION_STORE_URL = "https://kfm-cjav.onrender.com/customer"
+
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    db_path = '/tmp/grocery.db' if os.environ.get('RENDER') else 'grocery.db'
-    conn = sqlite3.connect(db_path)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     # 1. Products Table
@@ -40,34 +49,25 @@ def init_db():
             order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # Handle Migrations
-    cursor.execute("PRAGMA table_info(products)")
-    columns = [col[1] for col in cursor.fetchall()]
-    if 'stock' not in columns:
-        cursor.execute("ALTER TABLE products ADD COLUMN stock INTEGER DEFAULT 10")
-        conn.commit()
 
-    cursor.execute('SELECT COUNT(*) FROM products')
+    cursor.execute("SELECT COUNT(*) FROM products")
     if cursor.fetchone()[0] == 0:
         cursor.executemany('''
             INSERT INTO products (category, name, mrp, sale_price, instructions, stock)
             VALUES (?, ?, ?, ?, ?, ?)
         ''', [
-            ('Oils', 'Fortune Mustard Oil 1L', 190.00, 176.00, 'Store in a cool dry place.', 15),
+            ('Oils', 'Fortune Mustard Oil 1L', 190.00, 175.00, 'Store in a cool dry place.', 15),
             ('Oils', 'Hathi Mustard Oil 1L', 200.00, 178.00, 'Perfect for traditional Indian cooking.', 8),
             ('Spices', 'Catch Turmeric Powder 200g', 60.00, 52.00, 'Keep airtight after opening.', 25),
-            ('Dairy', 'Milk 1L', 70.00, 65.00, 'Store in a cool dry place.', 20),
-            ('Dairy', 'Cheese 200g', 135.00, 130.00, 'Store in a cool dry place.', 5),
-            ('Atta', 'Aashirwad Atta 10kg', 500.00, 450.00, 'Store in a cool dry place.', 12)
+            ('Dairy', 'Milk 1L', 190.00, 175.00, 'Store in a cool dry place.', 20),
+            ('Dairy', 'Cheese 200g', 190.00, 175.00, 'Store in a cool dry place.', 5),
+            ('Atta', 'Aashirwad Atta 10kg', 190.00, 175.00, 'Store in a cool dry place.', 12)
         ])
     conn.commit()
     conn.close()
 
 def query_db(query, args=(), one=False):
-    db_path = '/tmp/grocery.db' if os.environ.get('RENDER') else 'grocery.db'
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute(query, args)
     rv = cur.fetchall()
@@ -84,7 +84,22 @@ def generate_qr_base64():
     img.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-# --- MAIN SEGREGATED BASE HTML TEMPLATE STRUCTURE ---
+def calculate_delivery_charge(cart_total):
+    """
+    Implements a decreasing percentage delivery curve.
+    At very low order values, the percentage is higher.
+    As order value reaches closer to 1500, it drops down smoothly towards 0.
+    At 1500 or more, delivery is completely free.
+    """
+    if cart_total >= 1500 or cart_total <= 0:
+        return 0.0
+    
+    # Formula creates a smooth curve that scales down gracefully as value rises
+    # Base fee scales dynamically according to the remaining gap to reach free delivery
+    raw_charge = (1500 - cart_total) * 0.05 + 15.0
+    return round(raw_charge, 2)
+
+# --- MAIN BASE HTML TEMPLATE ---
 HTML_TEMPLATE_BASE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -93,7 +108,7 @@ HTML_TEMPLATE_BASE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Grocery Store</title>
     <style>
-        :root { --primary: #2e7d32; --secondary: #388e3c; --bg: #f1f8e9; --danger: #c62828; }
+        :root { --primary: #2e7d32; --secondary: #388e3c; --bg: #f1f8e9; --danger: #c62828; --warning: #f57c00; }
         body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 20px; background: var(--bg); color: #333; }
         header { display: flex; align-items: center; justify-content: space-between; background: var(--primary); color: white; padding: 15px 20px; border-radius: 8px; margin-bottom: 20px; position: relative; }
         header h1 { margin: 0; font-size: 22px; display: flex; align-items: center; gap: 10px; }
@@ -107,8 +122,9 @@ HTML_TEMPLATE_BASE = """
         .nav-menu a:hover { background: #e8f5e9; color: var(--primary); }
         .container { max-width: 900px; margin: 0 auto; }
         .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; }
-        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); text-align: center; cursor: pointer; transition: transform 0.2s; border: 1px solid #e0e0e0; position: relative; }
-        .card:hover { transform: translateY(-3px); box-shadow: 0 6px 12px rgba(0,0,0,0.1); }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); text-align: center; border: 1px solid #e0e0e0; display: flex; flex-direction: column; justify-content: space-between; }
+        .card-click { cursor: pointer; width: 100%; }
+        .card:hover { transform: translateY(-3px); box-shadow: 0 6px 12px rgba(0,0,0,0.1); transition: 0.2s; }
         .btn { background: var(--primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; text-align: center; }
         .btn-back { background: #616161; margin-bottom: 20px; }
         .btn-disabled { background: #bdc3c7; cursor: not-allowed; }
@@ -123,6 +139,7 @@ HTML_TEMPLATE_BASE = """
         .qty-input { width: 80px; text-align: center; display: inline-block; margin-right: 10px; }
         .alert { background: #ffcdd2; color: #b71c1c; padding: 12px; border-radius: 6px; margin-bottom: 20px; border-left: 5px solid var(--danger); }
         .alert-info { background: #e3f2fd; color: #0d47a1; border-left: 5px solid #2196f3; }
+        .alert-warning { background: #fff3e0; color: #e65100; border-left: 5px solid var(--warning); }
         table { width: 100%; border-collapse: collapse; margin-top: 15px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
         th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #eee; }
         th { background: #e8f5e9; color: var(--primary); font-weight: bold; }
@@ -160,7 +177,6 @@ HTML_TEMPLATE_BASE = """
           {% endif %}
         {% endwith %}
 
-        <!-- INJECTED DYNAMIC CONTENT -->
         {{ view_content | safe }}
     </div>
 
@@ -178,12 +194,10 @@ def render_store_page(view_content_template, context_data=None):
     if context_data is None:
         context_data = {}
     context_data['is_logged_in'] = session.get('logged_in', False)
-    
-    # Inject specific page views directly into base shell layout safely
     full_compiled_page = HTML_TEMPLATE_BASE.replace("{{ view_content | safe }}", view_content_template)
     return render_template_string(full_compiled_page, **context_data)
 
-# --- CUSTOMER CONTROLLER / ROUTING ---
+# --- CUSTOMER ENDPOINTS ---
 
 @app.route('/')
 def index():
@@ -191,6 +205,11 @@ def index():
 
 @app.route('/customer')
 def customer_home():
+    try:
+        init_db()
+    except Exception as e:
+        pass
+
     cats = query_db('SELECT DISTINCT category FROM products')
     categories_list = [row['category'] for row in cats]
     qr_img = generate_qr_base64()
@@ -199,7 +218,7 @@ def customer_home():
     <h2>Select a Category</h2>
     <div class="card-grid">
         {% for cat in categories %}
-            <div class="card" onclick="location.href='/customer/category/{{ cat }}'">
+            <div class="card" style="cursor: pointer;" onclick="location.href='/customer/category/{{ cat }}'">
                 <h3>{{ cat }}</h3>
                 <p style="color: var(--secondary);">Browse Products →</p>
             </div>
@@ -222,13 +241,22 @@ def customer_category(cat_name):
     <h2>{{ current_category }} Items</h2>
     <div class="card-grid">
         {% for prod in data %}
-            <div class="card" onclick="location.href='/customer/product/{{ prod[\'id\'] }}'">
-                <h3>{{ prod[\'name\'] }}</h3>
-                <div class="price-tag">₹{{ prod[\'sale_price\'] }}</div>
-                {% if prod[\'stock\'] <= 0 %}
-                    <span class="badge">Out of Stock</span>
-                {% else %}
-                    <span class="badge badge-success">In Stock ({{ prod[\'stock\'] }})</span>
+            <div class="card">
+                <div class="card-click" onclick="location.href='/customer/product/{{ prod[\'id\'] }}'">
+                    <h3>{{ prod[\'name\'] }}</h3>
+                    <div class="price-tag">₹{{ prod[\'sale_price\'] }}</div>
+                    {% if prod[\'stock\'] <= 0 %}
+                        <span class="badge" style="margin-bottom:15px;">Out of Stock</span>
+                    {% else %}
+                        <span class="badge badge-success" style="margin-bottom:15px;">In Stock</span>
+                    {% endif %}
+                </div>
+                
+                {% if prod[\'stock\'] > 0 %}
+                    <form action="/cart/add/{{ prod[\'id\'] }}" method="post">
+                        <input type="hidden" name="quantity" value="1">
+                        <button type="submit" class="btn" style="width:100%;">🛒 Add to Cart</button>
+                    </form>
                 {% endif %}
             </div>
         {% endfor %}
@@ -241,7 +269,7 @@ def customer_product(prod_id):
     prod = query_db('SELECT * FROM products WHERE id = ?', [prod_id], one=True)
     content = """
     <a href="/customer/category/{{ data[\'category\'] }}" class="btn btn-back">← Back to Product List</a>
-    <div class="card" style="text-align: left; cursor: default;">
+    <div class="card" style="text-align: left;">
         <h2 style="margin-top:10px;">{{ data[\'name\'] }}</h2>
         <hr style="border: 0; border-top: 1px solid #eee;">
         <div class="price-tag">Special Price: ₹{{ data[\'sale_price\'] }}</div>
@@ -257,7 +285,6 @@ def customer_product(prod_id):
                 <label for="quantity" style="display:inline; margin-right:10px;">Quantity:</label>
                 <input type="number" name="quantity" id="quantity" class="qty-input" value="1" min="1" max="{{ data[\'stock\'] }}">
                 <button type="submit" class="btn">🛒 Add to Cart</button>
-                <span style="font-size:12px; color:#666; margin-left:10px;">({{ data[\'stock\'] }} items available)</span>
             </form>
         {% endif %}
     </div>
@@ -272,7 +299,7 @@ def view_cart():
     
     if cart:
         placeholders = ','.join('?' for _ in cart.keys())
-        products = query_db(f'SELECT * FROM products WHERE id IN ({placeholders})', list(cart.keys()))
+        products = query_db(f'SELECT * FROM products WHERE id IN ({placeholders})', list(map(int, cart.keys())))
         for p in products:
             p_id = str(p['id'])
             qty = int(cart[p_id])
@@ -283,6 +310,10 @@ def view_cart():
                 'qty': qty, 'total': round(total_item_cost, 2)
             })
             
+    delivery_charge = calculate_delivery_charge(cart_total)
+    delivery_percentage = round((delivery_charge / cart_total * 100), 1) if cart_total > 0 else 0
+    grand_total = round(cart_total + delivery_charge, 2)
+    
     content = """
     <h2>🛒 Your Shopping Cart</h2>
     {% if not cart_items %}
@@ -291,6 +322,18 @@ def view_cart():
             <a href="/customer" class="btn" style="margin-top: 15px;">Start Browsing Products</a>
         </div>
     {% else %}
+        
+        {% if cart_total < 1500 %}
+            <div class="alert alert-warning" style="font-weight: 600; font-size: 15px; text-align: center;">
+                💡 Shop for <strong>₹{{ round(1500 - cart_total, 2) }}</strong> more to unlock <strong>FREE Delivery!</strong><br>
+                <span style="font-size: 13px; font-weight: normal; color: #555;">(Orders above ₹1500 are completely free)</span>
+            </div>
+        {% else %}
+            <div class="alert alert-info" style="font-weight: 600; font-size: 15px; text-align: center; border-left: 5px solid var(--primary);">
+                🎉 Congratulations! Your order qualifies for <strong>FREE Delivery</strong>.
+            </div>
+        {% endif %}
+
         <table>
             <thead>
                 <tr>
@@ -311,39 +354,52 @@ def view_cart():
                     <td><a href="/cart/remove/{{ item.id }}" style="color: var(--danger); text-decoration: none; font-weight: bold;">Remove</a></td>
                 </tr>
                 {% endfor %}
-                <tr style="font-weight: bold; background: #fafafa;">
-                    <td colspan="3" style="text-align: right;">Cart Total:</td>
-                    <td colspan="2" style="color: var(--primary); font-size: 18px;">₹{{ cart_total }}</td>
+                <tr style="background: #fafafa;">
+                    <td colspan="3" style="text-align: right; font-weight: bold;">Items Subtotal:</td>
+                    <td colspan="2" style="font-weight: bold;">₹{{ cart_total }}</td>
+                </tr>
+                <tr style="background: #fafafa;">
+                    <td colspan="3" style="text-align: right; font-weight: bold;">
+                        Delivery Charges: 
+                        {% if cart_total < 1500 %}
+                            <span style="font-size: 11px; font-weight: normal; color: #e65100;">({{ delivery_percentage }}% rate applied)</span>
+                        {% endif %}
+                    </td>
+                    <td colspan="2" style="font-weight: bold; color: {% if delivery_charge == 0 %}var(--primary){% else %}var(--warning){% endif %};">
+                        {% if delivery_charge == 0 %}FREE{% else %}+ ₹{{ delivery_charge }}{% endif %}
+                    </td>
+                </tr>
+                <tr style="font-weight: bold; background: #f0fdf4;">
+                    <td colspan="3" style="text-align: right; font-size: 16px;">Total Payable Amount:</td>
+                    <td colspan="2" style="color: var(--primary); font-size: 20px;">₹{{ grand_total }}</td>
                 </tr>
             </tbody>
         </table>
 
         <div class="card" style="text-align: left; margin-top: 30px;">
             <h3>🚚 Cash on Delivery (COD) Home Delivery</h3>
-            <p style="font-size: 14px; color: #555;">* Orders must be at least <strong>₹1500</strong> to qualify for delivery setup.</p>
-            
-            {% if cart_total < 1500 %}
-                <div class="alert" style="margin-bottom: 0;">
-                    <strong>Order Blocked:</strong> You need an additional <strong>₹{{ 1500 - cart_total }}</strong> to meet the minimum placement amount.
+            <form action="/cart/checkout" method="post" style="margin-top: 15px;">
+                <div class="form-group">
+                    <label>Mobile Phone Number</label>
+                    <input type="tel" name="phone" placeholder="Enter 10-digit mobile number" required>
                 </div>
-                <button class="btn btn-disabled" style="width: 100%; margin-top: 15px;" disabled>Minimum Limit Unmet</button>
-            {% else %}
-                <form action="/cart/checkout" method="post" style="margin-top: 15px;">
-                    <div class="form-group">
-                        <label>Mobile Phone Number</label>
-                        <input type="tel" name="phone" placeholder="Enter 10-digit mobile number" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Full Delivery Address</label>
-                        <textarea name="address" rows="3" placeholder="Enter your full home drop-off location address" required></textarea>
-                    </div>
-                    <button type="submit" class="btn" style="width: 100%; background: var(--secondary);">📦 Place Cash on Delivery Order</button>
-                </form>
-            {% endif %}
+                <div class="form-group">
+                    <label>Full Delivery Address</label>
+                    <textarea name="address" rows="3" placeholder="Enter your full home drop-off location address" required></textarea>
+                </div>
+                <button type="submit" class="btn" style="width: 100%; background: var(--secondary); font-size: 16px; padding: 12px;">📦 Place Cash on Delivery Order</button>
+            </form>
         </div>
     {% endif %}
     """
-    return render_store_page(content, {'cart_items': cart_items, 'cart_total': round(cart_total, 2)})
+    return render_store_page(content, {
+        'cart_items': cart_items, 
+        'cart_total': round(cart_total, 2), 
+        'delivery_charge': delivery_charge,
+        'delivery_percentage': delivery_percentage,
+        'grand_total': grand_total,
+        'round': round
+    })
 
 @app.route('/cart/add/<int:prod_id>', methods=['POST'])
 def add_to_cart(prod_id):
@@ -352,21 +408,23 @@ def add_to_cart(prod_id):
     
     if not prod or prod['stock'] <= 0:
         flash("Sorry, this item is currently out of stock!", "error")
-        return redirect(url_for('customer_home'))
+        return redirect(request.referrer or url_for('customer_home'))
         
     cart = session.get('cart', {})
     current_in_cart = cart.get(str(prod_id), 0)
     new_quantity = current_in_cart + quantity
     
     if new_quantity > prod['stock']:
-        flash(f"Cannot add requested amount. Max available inventory left is {prod['stock']}.", "error")
+        flash(f"Cannot add requested amount. Inventory limit exceeded.", "error")
         cart[str(prod_id)] = prod['stock']
     else:
         cart[str(prod_id)] = new_quantity
         flash(f"Added {quantity} x {prod['name']} to your cart!", "info")
         
     session['cart'] = cart
-    return redirect(url_for('view_cart'))
+    session.modified = True
+    
+    return redirect(request.referrer or url_for('customer_home'))
 
 @app.route('/cart/remove/<string:prod_id>')
 def remove_from_cart(prod_id):
@@ -387,7 +445,7 @@ def checkout_cart():
     address = request.form.get('address', '').strip()
     
     placeholders = ','.join('?' for _ in cart.keys())
-    products = query_db(f'SELECT * FROM products WHERE id IN ({placeholders})', list(cart.keys()))
+    products = query_db(f'SELECT * FROM products WHERE id IN ({placeholders})', list(map(int, cart.keys())))
     
     cart_total = 0.0
     items_summary_list = []
@@ -396,38 +454,36 @@ def checkout_cart():
         p_id = str(p['id'])
         qty = int(cart[p_id])
         if qty > p['stock']:
-            flash(f"Stock constraint issue encountered: '{p['name']}' has only {p['stock']} remaining units. Adjusting cart.", "error")
+            flash(f"Stock constraint issue: '{p['name']}' has only {p['stock']} remaining units.", "error")
             return redirect(url_for('view_cart'))
         cart_total += (p['sale_price'] * qty)
         items_summary_list.append(f"{p['name']} (x{qty})")
         
-    if cart_total < 1500:
-        flash("Checkout aborted. System minimum limits require orders over ₹1500.", "error")
-        return redirect(url_for('view_cart'))
+    delivery_charge = calculate_delivery_charge(cart_total)
+    grand_final_total = round(cart_total + delivery_charge, 2)
         
     for p in products:
         p_id = str(p['id'])
         qty = int(cart[p_id])
         query_db('UPDATE products SET stock = stock - ? WHERE id = ?', [qty, int(p_id)])
         
-    items_summary_str = ", ".join(items_summary_list)
-    query_db('INSERT INTO orders (phone, address, items_json, total_amount) VALUES (?, ?, ?, ?)',
-             [phone, address, items_summary_str, cart_total])
+    items_summary_str = f"{', '.join(items_summary_list)} | [Delivery Fee: ₹{delivery_charge}]"
+    query_db('INSERT INTO orders (phone, address, items_json, total_amount) VALUES (?, ?, ?, ?)', [phone, address, items_summary_str, grand_final_total])
              
     session.pop('cart', None)
     flash("Success! Your Cash on Delivery order has been registered.", "info")
     return redirect(url_for('customer_home'))
 
-# --- ADMIN SIDE INTERFACE LOGIC ---
+# --- ADMIN ENDPOINTS ---
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     error_msg = None
     if request.method == 'POST':
-        if request.form['username'] == 'kfm' and request.form['password'] == '114251':
+        if request.form['username'] == 'admin' and request.form['password'] == 'grocerystore2026':
             session['logged_in'] = True
             return redirect(url_for('admin_dashboard'))
-        error_msg = 'Incorrect password!'
+        error_msg = 'Incorrect credentials!'
         
     content = """
     <div class="card" style="max-width: 400px; margin: 40px auto; text-align: left;">
@@ -482,7 +538,7 @@ def admin_dashboard():
         <p style="background: white; padding: 20px; border-radius: 8px; color: #666;">No customer delivery orders placed yet.</p>
     {% else %}
         {% for order in active_orders %}
-            <div class="card" style="text-align: left; margin-bottom: 15px; border-left: 5px solid var(--secondary); cursor: default;">
+            <div class="card" style="text-align: left; margin-bottom: 15px; border-left: 5px solid var(--secondary);">
                 <strong>Order #{{ order[\'id\'] }} — Total: ₹{{ order[\'total_amount\'] }}</strong><br>
                 <span style="font-size: 13px; color: #666;">Placed Date: {{ order[\'order_date\'] }}</span>
                 <p style="margin: 8px 0;">📞 <strong>Phone:</strong> {{ order[\'phone\'] }} | 📍 <strong>Address:</strong> {{ order[\'address\'] }}</p>
@@ -528,7 +584,7 @@ def admin_dashboard():
         </form>
     </div>
 
-    <h2>Current Inventory Listing</h2>
+    <h2>Current Inventory Listing (Admin View Only)</h2>
     <table>
         <thead>
             <tr>
@@ -631,7 +687,5 @@ def logout():
     session.clear()
     return redirect(url_for('customer_home'))
 
-init_db()
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)             
