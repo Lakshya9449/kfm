@@ -480,7 +480,7 @@ def checkout_cart():
 def admin_login():
     error_msg = None
     if request.method == 'POST':
-        if request.form['username'] == 'admin' and request.form['password'] == 'grocerystore2026':
+        if request.form['username'] == 'kfm' and request.form['password'] == '114251':
             session['logged_in'] = True
             return redirect(url_for('admin_dashboard'))
         error_msg = 'Incorrect credentials!'
